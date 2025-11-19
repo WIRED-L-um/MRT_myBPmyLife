@@ -11,7 +11,7 @@ library(ggplot2)
 # load data
 
 ```{r}
-data = read_excel("C://Users//23300//University of Michigan Dropbox//Yuxuan Chen//myBPmyLife//Data Analysis//Data//MRT//myBPmyLife MRT Data 20241202.xlsx")
+data = read_excel("/data.xlsx")
 
 # remove the default year month in time records
 data$PrefTime_ET = format(as.POSIXct(data$PrefTime_ET,
@@ -33,7 +33,7 @@ data = data %>% filter(data$ParticipantIdentifier %in% coreCohortID)
 load demographic data
 
 ```{r}
-demo = read_csv("C://Users//23300//University of Michigan Dropbox//Yuxuan Chen//myBPmyLife//Data Analysis//Data//Participants//August_Analytic_File.csv")
+demo = read_csv("/data1.csv")
 
 demo = demo %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
 demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
@@ -306,9 +306,9 @@ summary(lowsalt_basesalt)
 ## Add new outcomes
 
 ```{r}
-new_Outcomes = read_csv("C:/Users/23300/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/Moderator/myBPmyLife Mod Data 20250122.csv")
+new_Outcomes = read_csv("/data2.csv")
 # Mac path
-new_Outcomes = read_csv("/Users/yuxuanchen/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/Moderator/myBPmyLife Mod Data 20250122.csv")
+new_Outcomes = read_csv("/data22.csv")
 new_Outcomes$ParticipantIdentifier = as.character(new_Outcomes$ParticipantIdentifier)
 new_Outcomes$DiceRollRowID = as.numeric(new_Outcomes$DiceRollRowID)
 ```
@@ -859,6 +859,7 @@ NumValues_Searches_60minAfter_community = emee(analysisdata_newoutcomes[!is.na(a
                 availability = IsAvailable,  numerator_prob = 0.99)
 summary(NumValues_Searches_60minAfter_community)
 ```
+
 
 
 
