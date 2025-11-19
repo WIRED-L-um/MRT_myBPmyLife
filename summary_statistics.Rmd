@@ -15,7 +15,7 @@ library(table1)
 # load data
 
 ```{r}
-data = read_excel("C:/Users/23300/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/MRT/myBPmyLife MRT Data 20241202.xlsx")
+data = read_excel("/data.xlsx")
 
 # remove the default year month in time records
 data$PrefTime_ET = format(as.POSIXct(data$PrefTime_ET,
@@ -32,7 +32,7 @@ data$DiceRollTime_ET = format(as.POSIXct(data$DiceRollTime_ET,
 load demographic data
 
 ```{r}
-demo = read_csv("C://Users//23300//University of Michigan Dropbox//Yuxuan Chen//myBPmyLife//Data Analysis//Data//Participants//August_Analytic_File.csv")
+demo = read_csv("/data1.csv")
 
 demo = demo %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
 demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
@@ -40,7 +40,7 @@ demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
 data = left_join(data, demo)
 
 # load baseline step data
-base_step = read_csv("C://Users//23300//University of Michigan Dropbox//Yuxuan Chen//myBPmyLife//Data Analysis//Data//Participants//Baseline_Step_Counts20240822.csv")
+base_step = read_csv("/data2.csv")
 base_step = base_step %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
 base_step$ParticipantIdentifier = as.character(base_step$ParticipantIdentifier)
 
@@ -49,7 +49,7 @@ data = left_join(data, base_step)
 load the baseline salt intake values
 
 ```{r}
-saltintake = read_csv("C:/Users/23300/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/Moderator/myBPmyLife Mod Data 20250122.csv")
+saltintake = read_csv("/data3.csv")
 
 saltintake = saltintake %>% select(ParticipantIdentifier, SodiumIntakeScore) %>% group_by(ParticipantIdentifier) %>% slice(1)
 saltintake$ParticipantIdentifier = as.character(saltintake$ParticipantIdentifier)
