@@ -16,10 +16,10 @@ library(ggpubr)
 # load data
 
 ```{r}
-data = read_excel("C:\\Users\\23300\\University of Michigan Dropbox\\Yuxuan Chen\\myBPmyLife\\Data Analysis\\Data\\MRT\\myBPmyLife MRT Data 20241202.xlsx")
+data = read_excel("\data.xlsx")
 
 # Use below when you are using your mac
-# data = read_excel("//Users//yuxuanchen//University of Michigan Dropbox//Yuxuan Chen//myBPmyLife//Data Analysis//Data//MRT//myBPmyLife MRT Data 20241202.xlsx")
+# data = read_excel("/data.xlsx")
 
 
 data$PrefTime_ET = format(as.POSIXct(data$PrefTime_ET,
@@ -39,11 +39,11 @@ n_distinct(data$ParticipantIdentifier)
 load demographic data
 
 ```{r}
-demo = read_csv("C:\\Users\\23300\\University of Michigan Dropbox\\Yuxuan Chen\\myBPmyLife\\Data Analysis\\Data\\Participants\\August_Analytic_File.csv")
+demo = read_csv("\data1.csv")
 demo$IsRaceWhite = ifelse(demo$race_char == "White",1,0)
 
 # Use below when you are using your mac
-# demo = read_csv("/Users/yuxuanchen/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/Participants/August_Analytic_File.csv")
+# demo = read_csv("/data1.csv")
 
 demo = demo %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
 demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
@@ -60,9 +60,9 @@ base_step$ParticipantIdentifier = as.character(base_step$ParticipantIdentifier)
 data = left_join(data, base_step)
 
 # only keep records for core cohort
-coreCohortID = readRDS("C:/Users/23300/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/MRT/Data Analysis/Explore Data/Code/coreCohortID.rds")
+coreCohortID = readRDS("/coreCohortID.rds")
 # use below if using mac
-coreCohortID = readRDS("/Users/yuxuanchen/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/MRT/Data Analysis/Explore Data/Code/coreCohortID.rds")
+coreCohortID = readRDS("/coreCohortID.rds")
 data = data %>% filter(ParticipantIdentifier %in% coreCohortID)
 ```
 
@@ -649,6 +649,7 @@ Sedentary_analysis = geeglm(log_step_counts ~
                  weights = IsAvailable)
 summary(Sedentary_analysis)
 ```
+
 
 
 
