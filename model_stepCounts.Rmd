@@ -51,9 +51,9 @@ demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
 data = left_join(data, demo[,c("ParticipantIdentifier","AgeAtConsent_years_calc_fixed", "Gender", "IsRaceWhite","IsWithdrawn", "TimeEnrollment_to_Exit_days", "Community")])
 
 # load baseline step data
-base_step = read_csv("C:\\Users\\23300\\University of Michigan Dropbox\\Yuxuan Chen\\myBPmyLife\\Data Analysis\\Data\\Participants\\Baseline_Step_Counts20240822.csv")
+base_step = read_csv("\Baseline_Step_Counts.csv")
 # Use below when you are using your mac
-# base_step = read_csv("/Users/yuxuanchen/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/Participants/Baseline_Step_Counts20240822.csv")
+# base_step = read_csv("/Baseline_Step_Counts.csv")
 base_step = base_step %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
 base_step$ParticipantIdentifier = as.character(base_step$ParticipantIdentifier)
 
@@ -649,6 +649,7 @@ Sedentary_analysis = geeglm(log_step_counts ~
                  weights = IsAvailable)
 summary(Sedentary_analysis)
 ```
+
 
 
 
