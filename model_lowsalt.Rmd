@@ -25,7 +25,7 @@ data$DiceRollTime_ET = format(as.POSIXct(data$DiceRollTime_ET,
                    format = '%H:%M:%S') 
 
 # only keep participants in core cohort
-coreCohortID = readRDS("C:/Users/23300/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/MRT/Data Analysis/Explore Data/Code/coreCohortID.rds")
+coreCohortID = readRDS("/coreCohortID.rds")
 
 data = data %>% filter(data$ParticipantIdentifier %in% coreCohortID)
 ```
@@ -41,7 +41,7 @@ demo$IsRaceWhite = ifelse(demo$race_char == "White", 1, 0)
 
 data = left_join(data, demo[,c("ParticipantIdentifier","AgeAtConsent_years_calc_fixed", "Gender", "IsCommunityAnnArbor", "IsRaceWhite")])
 
-saltintake = read_csv("C:/Users/23300/University of Michigan Dropbox/Yuxuan Chen/myBPmyLife/Data Analysis/Data/Moderator/myBPmyLife Mod Data 20250122.csv")
+saltintake = read_csv("/data2.csv")
 
 saltintake = saltintake %>% select(ParticipantIdentifier, SodiumIntakeScore) %>% group_by(ParticipantIdentifier) %>% slice(1)
 saltintake$ParticipantIdentifier = as.character(saltintake$ParticipantIdentifier)
@@ -859,6 +859,7 @@ NumValues_Searches_60minAfter_community = emee(analysisdata_newoutcomes[!is.na(a
                 availability = IsAvailable,  numerator_prob = 0.99)
 summary(NumValues_Searches_60minAfter_community)
 ```
+
 
 
 
