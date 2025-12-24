@@ -1,0 +1,652 @@
+```{r, warning=FALSE, message=FALSE,results='hide'}
+library(readxl)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(table1)
+library(arsenal)
+library(rstatix)
+library(geepack)
+library(MRTAnalysis)
+library(stringr)
+library(ggsci)
+library(ggpubr)
+```
+
+# load MRT data
+
+```{r}
+data = read_excel("\MRT data.xlsx")
+
+# Use below when you are using your mac
+# data = read_excel("/data.xlsx")
+
+
+# number of participants
+n_distinct(data$ParticipantIdentifier)
+```
+
+load demographic data myBPmyLife_Analytic_5_10_2025.csv from myBPmyLife Primary Study: https://github.com/WIRED-L-um/myBPmyLife-Primary-Analysis 
+
+```{r}
+demo = read_csv("\myBPmyLife_Analytic_5_10_2025.csv")
+demo$IsRaceWhite = ifelse(demo$race_char == "White",1,0)
+
+# Use below when you are using your mac
+# demo = read_csv("/data1.csv")
+
+demo = demo %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
+demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
+
+data = left_join(data, demo[,c("ParticipantIdentifier","AgeAtConsent_years_calc_fixed", "Gender", "IsRaceWhite","IsWithdrawn", "TimeEnrollment_to_Exit_days", "Community")])
+
+# load baseline step data
+base_step = read_csv("\Baseline_Step_Counts.csv")
+# Use below when you are using your mac
+# base_step = read_csv("/Baseline_Step_Counts.csv")
+base_step = base_step %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
+base_step$ParticipantIdentifier = as.character(base_step$ParticipantIdentifier)
+
+data = left_join(data, base_step)
+
+# only keep records for core cohort
+coreCohortID = readRDS("/coreCohortID.rds")
+# use below if using mac
+coreCohortID = readRDS("/coreCohortID.rds")
+data = data %>% filter(ParticipantIdentifier %in% coreCohortID)
+```
+
+```{r}
+# only keep records with dice roll performed
+dicerolled = data %>% filter(!is.na(DiceRollType))
+
+dim(data)[1] - dim(dicerolled)[1] # 4470
+n_distinct(dicerolled$ParticipantIdentifier) # 287
+```
+
+Now create three types of intervention column: At_act, At_diet, At
+
+```{r}
+dicerolled$At_act = dicerolled$IsDiceRollTypeActivity* dicerolled$IsDiceRollSuccess
+dicerolled$At_diet = dicerolled$IsDiceRollTypeDiet* dicerolled$IsDiceRollSuccess
+dicerolled$At = dicerolled$At_act + dicerolled$At_diet
+```
+
+Create availability based on whether heart rate is detected 30 min before scheduled dice roll.
+
+```{r}
+# check whether we have missing value in column IsPresent_HeartRate_30minBefore after we only keep records with dice rolls
+sum(is.na(dicerolled$IsPresent_HeartRate_30minBefore)) # no missing
+dicerolled$IsAvailable = ifelse(dicerolled$IsPresent_HeartRate_30minBefore == 1, 1, 0)
+```
+check availability
+
+```{r}
+table(dicerolled$IsDiceRollTypeActivity, dicerolled$IsAvailable)
+```
+
+The availability is evenly distributed within two dice roll type groups.
+
+# Step counts 1 hr after dice rolled
+
+```{r}
+hist(dicerolled$SumValues_Steps_60minAfter, breaks = 30, main = "Histogram of total step counts 60 min after dice roll (updated data)")
+summary(dicerolled$SumValues_Steps_60minAfter)
+```
+
+Inflate the step counts by 0.5 then take log transform
+
+```{r}
+dicerolled$log_step_counts = log(dicerolled$SumValues_Steps_60minAfter + 0.5)
+summary(dicerolled$log_step_counts)
+hist(dicerolled$log_step_counts)
+```
+
+Standardize continuous variables and relevel some categorical variables
+
+```{r}
+# standardize age at consent
+dicerolled$AgeAtConsent_years_calc_fixed_org = dicerolled$AgeAtConsent_years_calc_fixed
+dicerolled$AgeAtConsent_years_calc_fixed = scale(dicerolled$AgeAtConsent_years_calc_fixed)
+dicerolled$AgeAbove65 = dicerolled$AgeAtConsent_years_calc_fixed_org > 65
+# standardize average step counts at baseline
+dicerolled$base_steps_org = dicerolled$base_steps
+dicerolled$base_steps = scale(dicerolled$base_steps)
+dicerolled$base_step_Above_mean = dicerolled$base_steps_org > mean(base_step$base_steps[base_step$ParticipantIdentifier %in% coreCohortID])
+# standardize time from enrollment
+dicerolled$TimeEnrollment_to_PrefDate_days_orig = dicerolled$TimeEnrollment_to_PrefDate_days
+dicerolled$TimeEnrollment_to_PrefDate_days = scale(dicerolled$TimeEnrollment_to_PrefDate_days)
+# standardize step counts 30 mins prior
+dicerolled$SumValues_Steps_30minBefore_orig = dicerolled$SumValues_Steps_30minBefore
+dicerolled$SumValues_Steps_30minBefore = scale(dicerolled$SumValues_Steps_30minBefore)
+
+
+dicerolled_NAremove = dicerolled
+# there is also missingness in SumValues_Steps_30minBefore and SumValues_Steps_60minAfter
+dicerolled_NAremove = dicerolled_NAremove[!is.na(dicerolled_NAremove$SumValues_Steps_30minBefore),]
+dicerolled_NAremove = dicerolled_NAremove[!is.na(dicerolled_NAremove$SumValues_Steps_60minAfter),]
+
+# relevel the race to two categories one is white, the other is non-white
+#dicerolled_NAremove$race2 = ifelse(dicerolled_NAremove$race_char == "White", "White", "Non-White")
+
+# there is only one participant who claims the gender is other, I will remove this person for analysis
+# dicerolled_NAremove = dicerolled_NAremove[dicerolled_NAremove$Gender != "O",]
+
+n_distinct(dicerolled_NAremove$ParticipantIdentifier)
+```
+
+```{r}
+# restrict day in study between 8 to 180
+# check range
+dim(data)[1] - dim(dicerolled_NAremove)[1]
+min(dicerolled_NAremove$TimeEnrollment_to_PrefDate_days_orig)
+max(dicerolled_NAremove$TimeEnrollment_to_PrefDate_days_orig)
+```
+
+
+```{r}
+dayinstudy = dicerolled_NAremove %>% group_by(ParticipantIdentifier) %>% summarise(nobs = n(),
+  Intervention_days = max(TimeEnrollment_to_PrefDate_days_orig) - min(TimeEnrollment_to_PrefDate_days_orig) + 1,
+  Enrolldays = max(TimeEnrollment_to_PrefDate_days_orig),
+  DecisionTimepoint = sum(!is.na(DiceRollRowID)))
+
+head(dayinstudy)
+summary(dayinstudy$nobs)
+sd(dayinstudy$nobs)
+summary(dayinstudy$Intervention_days)
+sd(dayinstudy$Intervention_days)
+summary(dayinstudy$Enrolldays)
+sd(dayinstudy$Enrolldays)
+summary(dayinstudy$DecisionTimepoint)
+sd(dayinstudy$DecisionTimepoint)
+```
+
+```{r}
+availability = dicerolled_NAremove %>% filter(!is.na(IsAvailable)) %>% group_by(ParticipantIdentifier) %>% summarise(num_records = n(),
+                                                                                       Available_prop = sum(IsAvailable)/n())
+head(availability)
+
+summary(availability$Available_prop)
+sd(availability$Available_prop)
+
+```
+
+First intervention happen day
+
+```{r}
+invert = dicerolled %>% group_by(ParticipantIdentifier) %>% slice(1)
+summary(invert$TimeEnrollment_to_PrefDate_days_orig)
+table(invert$TimeEnrollment_to_PrefDate_days_orig)
+table(invert$TimeEnrollment_to_PrefDate_days_orig)/dim(invert)[1]
+```
+
+
+## GEE model marginal effects 
+
+Fit model use the whole data set where we drop records with missingness in baseline step counts, step counts 30 min before and step counts 1 hr after.
+
+
+## The Large Model
+
+```{r}
+# use availability that defines only based on heart rate indep of dice roll type
+stepmodel1a = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      SumValues_Steps_30minBefore + 
+                      TimeEnrollment_to_PrefDate_days +
+                      I(At_act - 0.125) + I(At_diet - 0.125),
+                    data = dicerolled_NAremove, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(stepmodel1a)
+
+```
+
+
+```{r}
+# use the Hotelling’s T-squared distribution to get the p value and critical value for CI
+## critical value
+sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))
+
+0.012468 + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.014885    
+
+-0.005140 + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.015486        
+
+exp(0.012468)
+exp(0.012468) *0.014885
+exp(0.012468) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(0.012468) *0.014885
+
+exp(-0.005140)
+exp(-0.005140) * 0.015486    
+exp(-0.005140) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(-0.005140) * 0.015486
+
+ ## p value
+1 - pf(0.702 , df1 = 1, df2 = 287-9)
+1 - pf(0.110 , df1 = 1, df2 = 287-9)
+
+```
+
+```{r}
+# point estimates exp scale
+exp(stepmodel1a$coefficients)
+
+# se in exp scale
+print(exp(stepmodel1a$coefficients)*c(summary(stepmodel1a)$coefficients[, "Std.err"]))
+
+# 95% CI in exp scale
+## lower
+exp(stepmodel1a$coefficients) - sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(stepmodel1a$coefficients)*c(summary(stepmodel1a)$coefficients[, "Std.err"])
+## upper
+exp(stepmodel1a$coefficients) + sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(stepmodel1a$coefficients)*c(summary(stepmodel1a)$coefficients[, "Std.err"])
+
+1 - pf(summary(stepmodel1a)$coefficients[,"Wald"], df1 = 1, df2 = 287-9)
+```
+
+
+# 3 hr after dice roll wear time
+
+```{r}
+summary(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter)
+sum(is.na(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter))/dim(dicerolled_NAremove)[1] # 9.47% missing
+sum(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter <= 1.5, na.rm = T)/dim(dicerolled_NAremove)[1] # 0.0524 less than or equal to 1.5
+sum(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter <= 1, na.rm = T)/dim(dicerolled_NAremove)[1] # 0.0314 less than or equal to 1
+sum(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter ==0, na.rm = T)/dim(dicerolled_NAremove)[1] # 0.0013 equal to 0
+(sum(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter ==0, na.rm = T) + sum(is.na(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter)))/dim(dicerolled_NAremove)[1] # 0.096
+```
+
+```{r}
+hist(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter)
+```
+
+check the distribution of step counts 3 hr after dice roll when the wear time is 0 or missing
+
+```{r}
+zero_missing_3hr_wear = dicerolled_NAremove[dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter == 0|
+                                     is.na(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter),]
+```
+
+```{r}
+summary(zero_missing_3hr_wear$SumValues_Steps_03hrAfter)
+hist(zero_missing_3hr_wear$SumValues_Steps_03hrAfter)
+```
+
+```{r}
+# rate of zero step counts 3 hr after dice roll when wear time is missing or 0
+sum(zero_missing_3hr_wear$SumValues_Steps_03hrAfter == 0, na.rm = T)/dim(zero_missing_3hr_wear)[1]
+```
+
+The rate of zero step counts is 87.9.
+
+Now check the population level 0 rate for step count 3 hr after
+
+```{r}
+sum(dicerolled_NAremove$SumValues_Steps_03hrAfter == 0, na.rm =T)/dim(dicerolled_NAremove)[1]
+```
+
+For the population level, the 9.04% data with 0 step counts 3hr after. 
+
+```{r}
+sum(zero_missing_3hr_wear$SumValues_Steps_03hrAfter == 0, na.rm = T)/dim(dicerolled_NAremove)[1]
+```
+
+If I remove all records with 0 wear time and missing wear time
+
+```{r}
+nonzero_weartime_3hr = dicerolled_NAremove[!is.na(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter) & (dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter != 0),]
+
+# use the availability that only depends on heart rate
+stepmodel1a_nonzero = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      SumValues_Steps_30minBefore + 
+                      TimeEnrollment_to_PrefDate_days +
+                      I(At_act - 0.125) + I(At_diet - 0.125),
+                    data = nonzero_weartime_3hr, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(stepmodel1a_nonzero)
+```
+
+
+```{r}
+# use the Hotelling’s T-squared distribution to get the p value and critical value for CI
+## critical value
+sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))
+
+0.01395 + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.01417    
+-0.00545  + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.01531    
+
+exp(0.01395)
+0.01417*exp(0.01395)
+exp(0.01395) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.01417*exp(0.01395)
+
+exp(-0.00545)
+exp(-0.00545)*0.01531    
+exp(-0.00545) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(-0.00545)*0.01531    
+
+## p value
+1 - pf(0.97, df1 = 1, df2 = 287-9)
+1 - pf(0.13, df1 = 1, df2 = 287-9)
+```
+
+```{r}
+# point estimates exp scale
+exp(stepmodel1a_nonzero$coefficients)
+
+# se in exp scale
+print(exp(stepmodel1a_nonzero$coefficients)*c(summary(stepmodel1a_nonzero)$coefficients[, "Std.err"]))
+
+# 95% CI in exp scale
+## lower
+exp(stepmodel1a_nonzero$coefficients) - sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(stepmodel1a_nonzero$coefficients)*c(summary(stepmodel1a_nonzero)$coefficients[, "Std.err"])
+
+## upper
+exp(stepmodel1a_nonzero$coefficients) + sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(stepmodel1a_nonzero$coefficients)*c(summary(stepmodel1a_nonzero)$coefficients[, "Std.err"])
+
+
+1 - pf(summary(stepmodel1a_nonzero)$coefficients[,"Wald"], df1 = 1, df2 = 287-9)
+```
+
+Now I only remove records with 0 step counts and missing/0 wear time 3 hr after dice roll.
+
+```{r}
+nonzero_step_weartime = dicerolled_NAremove[!((is.na(dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter) | (dicerolled_NAremove$SumValues_WearTime_hr_03hrAfter == 0))& (dicerolled_NAremove$SumValues_Steps_03hrAfter == 0)),]
+
+stepmodel1a_nonzero_step = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      SumValues_Steps_30minBefore + 
+                      TimeEnrollment_to_PrefDate_days +
+                      I(At_act - 0.125) + I(At_diet - 0.125),
+                    data = nonzero_step_weartime, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(stepmodel1a_nonzero_step)
+```
+
+
+```{r}
+# use the Hotelling’s T-squared distribution to get the p value and critical value for CI
+## critical value
+sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))
+
+0.01438 + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.01419        
+-0.00476 + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.01533        
+
+exp(0.01438)
+exp(0.01438)*0.01419    
+exp(0.01438) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(0.01438)*0.01419    
+
+exp(-0.00476)
+exp(-0.00476)*0.01533        
+exp(-0.00476) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*0.01533*exp(-0.00476)
+
+## p value
+1 - pf(1.03, df1 = 1, df2 = 287-9)
+1 - pf(0.01, df1 = 1, df2 = 287-9)
+```
+
+
+## Add time treatment interaction effect
+
+```{r}
+stepmodel_quadratic_timing = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) + SumValues_Steps_30minBefore +
+                      TimeEnrollment_to_PrefDate_days_orig +
+                      I(TimeEnrollment_to_PrefDate_days_orig^2)+
+                      I(At_act - 0.125) + 
+                        I(At_act - 0.125):TimeEnrollment_to_PrefDate_days_orig + 
+                        I(At_act - 0.125):I(TimeEnrollment_to_PrefDate_days_orig^2)+
+                        I(At_diet - 0.125) +
+                        I(At_diet - 0.125):TimeEnrollment_to_PrefDate_days_orig+
+                        I(At_diet - 0.125):I(TimeEnrollment_to_PrefDate_days_orig^2),
+                    data = dicerolled_NAremove, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(stepmodel_quadratic_timing)
+```
+
+```{r}
+# use the Hotelling’s T-squared distribution to get the p value and critical value for CI
+## critical value
+sqrt(qf(0.95, df1 = 1, df2 = 287 - 14))
+
+## Act p value
+1 - pf(6.43, df1 = 1, df2 = 287-14)
+1 - pf(5.15, df1 = 1, df2 = 287-14)
+1 - pf(2.67, df1 = 1, df2 = 287-14)
+
+## Diet p value
+1 - pf(2.34, df1 = 1, df2 = 287-14)
+1 - pf(7.75, df1 = 1, df2 = 287-14)
+1 - pf(7.37, df1 = 1, df2 = 287-14)
+```
+
+Data visudalization
+
+```{r}
+act_bool_gee = str_detect(names(coef(stepmodel_quadratic_timing)),"At_act")
+act_coef_gee = coef(stepmodel_quadratic_timing)[act_bool_gee]
+act_vcov_gee = vcov(stepmodel_quadratic_timing)[act_bool_gee,act_bool_gee]
+act_bs_func = matrix(c(rep(1, 173),
+                     8:180,
+                     (8:180)^2), nrow = 173)
+```
+
+```{r}
+df_act = data.frame(Phase = 8:180,
+                    Stepchange= act_bs_func %*% act_coef_gee,
+                    SE = sqrt(diag(act_bs_func %*% act_vcov_gee %*% t(act_bs_func))),
+                    Type = "Activity")
+```
+
+```{r}
+diet_bool_gee = str_detect(names(coef(stepmodel_quadratic_timing)),"At_diet")
+diet_coef_gee = coef(stepmodel_quadratic_timing)[diet_bool_gee]
+diet_vcov_gee = vcov(stepmodel_quadratic_timing)[diet_bool_gee,diet_bool_gee]
+diet_bs_func = matrix(c(rep(1, 173),
+                     8:180,
+                     (8:180)^2), nrow = 173)
+df_diet = data.frame(Phase = 8:180,
+                    Stepchange= diet_bs_func %*% diet_coef_gee,
+                    SE =sqrt(diag(diet_bs_func %*% diet_vcov_gee %*% t(diet_bs_func))),
+                    Type = "Diet")
+
+```
+
+```{r}
+df_visual = rbind(df_act, df_diet)
+
+```
+
+```{r}
+## critical value
+sqrt(qf(0.95, df1 = 1, df2 = 287 - 14))
+
+linear_spline_gee_plot = ggplot(data=df_visual, aes(x= Phase, y=Stepchange, group = Type, fill = Type, color = Type)) +
+  geom_ribbon(aes(ymin=Stepchange-1.97*SE, ymax=Stepchange+1.97*SE),width=0.1, alpha = 0.3)+
+  xlab("Time from Enrollment (days)")+
+  ylab("Treatment effects")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =0, linetype=2)+
+  theme(legend.position = "right",
+        legend.key = element_blank()) +
+  scale_color_manual(values = c("Activity" = "purple",
+                                "Diet"= "steelblue"))
+print(linear_spline_gee_plot)
+```
+
+Make it exponential scale
+
+```{r}
+df_act2 = data.frame(Phase = 8:180,
+                    Stepchange= exp(act_bs_func %*% act_coef_gee),
+                    SE = exp(act_bs_func %*% act_coef_gee) * 
+                      sqrt(diag(act_bs_func %*% act_vcov_gee %*% t(act_bs_func))),
+                    Type = "Activity")
+df_diet2 = data.frame(Phase = 8:180,
+                    Stepchange= exp(diet_bs_func %*% diet_coef_gee),
+                    SE = exp(diet_bs_func %*% diet_coef_gee) * 
+                      sqrt(diag(diet_bs_func %*% diet_vcov_gee %*% t(diet_bs_func))),
+                    Type = "Diet")
+
+df_visual2 = rbind(df_act2, df_diet2)
+
+sqrt(qf(0.95, df1 = 1, df2 = 287 - 14))
+
+linear_spline_gee_plot_exp_scale = ggplot(data=df_visual2[df_visual2$Type == "Activity",], aes(x= Phase, y=Stepchange, group = Type, fill = Type, color = Type)) +
+  geom_ribbon(aes(ymin=Stepchange-1.97*SE, ymax=Stepchange+1.97*SE),width=0.1, alpha = 0.3)+
+  xlab("Time from Enrollment (days)")+
+  ylab("Treatment effects")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =1, linetype=2, color = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank()) +
+  scale_color_manual(values = c("Activity" = "coral","Diet"= "steelblue")) + coord_cartesian(ylim = c(0.6, 1.3)) + scale_y_continuous(breaks = seq(0.6,1.3, by = 0.1))
+print(linear_spline_gee_plot_exp_scale)
+```
+
+## Add primary model
+
+Add sedentary indicator
+
+```{r}
+dicerolled_NAremove$IsSedentary = dicerolled_NAremove$SumValues_Steps_30minBefore_orig < 50
+```
+
+### treatment varied by age groups
+
+```{r}
+# use availability that defines only based on heart rate indep of dice roll type
+Age_group_analysis = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      SumValues_Steps_30minBefore + 
+                      TimeEnrollment_to_PrefDate_days +
+                      I(At_act - 0.125) + I(At_act - 0.125):AgeAbove65  + I(At_diet - 0.125) + I(At_diet - 0.125):AgeAbove65,
+                    data = dicerolled_NAremove, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(Age_group_analysis)
+
+```
+
+### treatment varied by sex groups
+
+```{r}
+# use availability that defines only based on heart rate indep of dice roll type
+Sex_group_analysis = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      SumValues_Steps_30minBefore + 
+                      TimeEnrollment_to_PrefDate_days +
+                      I(At_act - 0.125) + I(At_act - 0.125):factor(Gender) + I(At_diet - 0.125) + I(At_diet - 0.125):factor(Gender),
+                    data = dicerolled_NAremove, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(Sex_group_analysis)
+```
+
+### treatment varied by community groups
+
+```{r}
+Community_group_analysis = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      SumValues_Steps_30minBefore + 
+                      TimeEnrollment_to_PrefDate_days + factor(Community) + 
+                      I(At_act - 0.125) + I(At_act - 0.125):factor(Community) + 
+                        I(At_diet - 0.125) + I(At_diet - 0.125):factor(Community),
+                    data = dicerolled_NAremove, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(Community_group_analysis)
+
+```
+
+### treatment varied by baseline activity groups
+
+```{r}
+BaseAct_group_analysis = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      SumValues_Steps_30minBefore + 
+                      TimeEnrollment_to_PrefDate_days +
+                      I(At_act - 0.125) + I(At_act - 0.125):base_step_Above_mean + 
+                        I(At_diet - 0.125) + I(At_diet - 0.125):base_step_Above_mean,
+                    data = dicerolled_NAremove, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(BaseAct_group_analysis)
+```
+
+```{r}
+# use the Hotelling’s T-squared distribution to get the p value and critical value for CI
+## critical value
+sqrt(qf(0.95, df1 = 1, df2 = 287 - 11))
+
+0.04393 + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 11))*0.01995     
+-0.07143 + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 11))*0.02959
+
+exp(-0.07143)
+exp(-0.07143) * 0.02959        
+exp(-0.07143) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 11))*exp(-0.07143) * 0.02959
+
+exp(0.04393)
+exp(0.04393) * 0.01995            
+exp(0.04393) + c(-1,1)*sqrt(qf(0.95, df1 = 1, df2 = 287 - 11))*exp(0.04393) * 0.01995      
+
+ ## p value
+1 - pf(5.83 , df1 = 1, df2 = 287-11)
+1 - pf(4.85 , df1 = 1, df2 = 287-11)
+```
+
+```{r}
+# point estimates exp scale
+exp(BaseAct_group_analysis$coefficients)
+
+# se in exp scale
+print(exp(BaseAct_group_analysis$coefficients)*c(summary(BaseAct_group_analysis)$coefficients[, "Std.err"]))
+
+# 95% CI in exp scale
+## lower
+exp(BaseAct_group_analysis$coefficients) - sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(BaseAct_group_analysis$coefficients)*c(summary(BaseAct_group_analysis)$coefficients[, "Std.err"])
+
+## upper
+exp(BaseAct_group_analysis$coefficients) + sqrt(qf(0.95, df1 = 1, df2 = 287 - 9))*exp(BaseAct_group_analysis$coefficients)*c(summary(BaseAct_group_analysis)$coefficients[, "Std.err"])
+
+
+1 - pf(summary(BaseAct_group_analysis)$coefficients[,"Wald"], df1 = 1, df2 = 287-9)
+```
+
+### Sedentary analysis
+
+```{r}
+Sedentary_analysis = geeglm(log_step_counts ~ 
+                      factor(AgeAbove65) + factor(Gender) + 
+                      factor(IsRaceWhite) + factor(base_step_Above_mean) +
+                      factor(IsSedentary) + 
+                      TimeEnrollment_to_PrefDate_days +
+                      I(At_act - 0.125)+ I(At_act - 0.125):factor(IsSedentary)+ I(At_diet - 0.125) + I(At_diet - 0.125):factor(IsSedentary),
+                    data = dicerolled_NAremove, corstr = "independence",
+                    id = as.factor(ParticipantIdentifier), family = gaussian(), 
+                 weights = IsAvailable)
+summary(Sedentary_analysis)
+```
+
+
+
+
+
+
+
+
+
+
+

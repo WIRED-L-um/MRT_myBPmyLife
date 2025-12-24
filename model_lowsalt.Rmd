@@ -1,0 +1,861 @@
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(tidyverse)
+library(geepack)
+library(MRTAnalysis)
+library(stringr)
+library(ggplot2)
+```
+
+
+# load data
+
+```{r}
+data = read_excel("/MRT data.xlsx")
+
+
+# only keep participants in core cohort
+coreCohortID = readRDS("/coreCohortID.rds")
+
+data = data %>% filter(data$ParticipantIdentifier %in% coreCohortID)
+```
+
+load demographic data myBPmyLife_Analytic_5_10_2025.csv from myBPmyLife Primary Study: https://github.com/WIRED-L-um/myBPmyLife-Primary-Analysis
+
+```{r}
+demo = read_csv("/myBPmyLife_Analytic_5_10_2025.csv")
+
+demo = demo %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
+demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
+demo$IsRaceWhite = ifelse(demo$race_char == "White", 1, 0)
+
+data = left_join(data, demo[,c("ParticipantIdentifier","AgeAtConsent_years_calc_fixed", "Gender", "IsCommunityAnnArbor", "IsRaceWhite")])
+
+saltintake = read_csv("/Moderator.csv")
+
+saltintake = saltintake %>% select(ParticipantIdentifier, SodiumIntakeScore) %>% group_by(ParticipantIdentifier) %>% slice(1)
+saltintake$ParticipantIdentifier = as.character(saltintake$ParticipantIdentifier)
+
+data = left_join(data, saltintake)
+```
+
+# Availability
+
+Makes participant always available
+
+```{r}
+data$IsAvailable_lowsalt = 1
+table(data$IsDiceRollTypeDiet, data$IsAvailable_lowsalt)
+
+```
+
+# Indicator for whether keep in analysis
+
+We only consider we have three potential interventions: send diet notification, send activity notification, and no notification send (regradless type).
+
+We will only keep records in analysis when no diet notification send out within the 24 hrs after dice roll. So if the dice roll type is diet but the notification is not sent, this record will also be used for analysis.
+
+```{r}
+data$IsIncludedAnalysis = (data$NumRows_Overlaps_24hr_Activity_Success == 0)
+```
+
+# Calculate the probability of observing the intervention combinations
+
+The default probability for records without dice roll in the next 24 hr window is 1.
+
+```{r}
+data$prob_Obs_Intervention_Com = ifelse(data$NumRows_Overlaps_24hr_All == 0, 1,
+                                        (1/8)^(data$NumRows_Overlaps_24hr_Diet_Success+data$NumRows_Overlaps_24hr_Activity_Success) *
+                                          (3/8)^(data$NumRows_Overlaps_24hr_Activity_Failure + data$NumRows_Overlaps_24hr_Diet_Failure))
+summary(data$prob_Obs_Intervention_Com)  
+```
+
+# Only keep records with dice roll performed
+
+```{r}
+# only keep records with dice roll performed
+dicerolled = data %>% filter(!is.na(DiceRollRowID))
+```
+
+check the distribution of probability
+
+```{r}
+summary(dicerolled$prob_Obs_Intervention_Com)
+sum(dicerolled$prob_Obs_Intervention_Com == 1)
+```
+There are 57 obs without any dice roll within the 24 hr windows.
+
+# The records eventually will be used for modeling
+
+```{r}
+analysisdata = dicerolled[dicerolled$IsIncludedAnalysis == 1,]
+
+# remove "other gender"
+#analysisdata = analysisdata[analysisdata$Gender != "O",]
+# standardized age
+analysisdata$AgeStd = scale(analysisdata$AgeAtConsent_years_calc_fixed)
+analysisdata$AgeAbove65 = analysisdata$AgeAtConsent_years_calc_fixed > 65
+# standardized salt intake
+analysisdata$SodiumIntakeScore_std = scale(analysisdata$SodiumIntakeScore)
+meanSodiumIntake = mean(saltintake$SodiumIntakeScore[saltintake$ParticipantIdentifier %in% coreCohortID])
+analysisdata$AboveMeanSodiumIntake = analysisdata$SodiumIntakeScore > meanSodiumIntake
+# categorize the participants' identifier
+analysisdata$ParticipantIdentifier = as.factor(analysisdata$ParticipantIdentifier)
+
+analysisdata = analysisdata[analysisdata$prob_Obs_Intervention_Com != 1,] 
+# drop the 57 obs that don't have any dice roll within 24 hr
+analysisdata$GenderM = as.numeric(analysisdata$Gender=="M")
+```
+
+check the proportion of data we dropped
+
+```{r}
+dim(dicerolled)[1] - dim(analysisdata)[1]
+(dim(dicerolled)[1] - dim(analysisdata)[1])/dim(dicerolled)[1]
+```
+
+We drop 46783 lines of records compared with the original data which is 24.37% of the original number of records.
+
+Now create three types of intervention column: At_act, At_diet, At
+
+```{r}
+analysisdata$At_act = analysisdata$IsDiceRollTypeActivity* analysisdata$IsDiceRollSuccess
+analysisdata$At_diet = analysisdata$IsDiceRollTypeDiet* analysisdata$IsDiceRollSuccess
+analysisdata$At = analysisdata$At_act + analysisdata$At_diet
+```
+
+
+# Test modeling
+
+```{r}
+source("./Function download from Github/emee.R")
+source("./Function download from Github/preprocess_input.R")
+source("./Function download from Github/get_alpha_beta_from_multiroot_result.R")
+source("./Function download from Github/find_change_location.R")
+```
+
+```{r}
+lowsalt = emee(analysisdata, id = "ParticipantIdentifier", outcome = "NumValues_LowSaltChoices_24hrAfter",
+                treatment="At_diet",
+                rand_prob = "prob_Obs_Intervention_Com", moderator_formula = ~ 1, 
+                control_formula = ~ AgeAbove65 + GenderM + NumValues_LowSaltChoices_30minBefore +
+                 AboveMeanSodiumIntake + IsRaceWhite + TimeEnrollment_to_PrefDate_days,
+                availability = IsAvailable_lowsalt, numerator_prob = 0.99)
+summary(lowsalt)
+
+```
+
+```{r}
+# critical value
+(lowsalt[["fit"]][["beta_hat"]] - lowsalt[["fit"]][["conf_int_adjusted"]][1])/lowsalt[["fit"]][["beta_se_adjusted"]]
+
+exp(lowsalt[["fit"]][["beta_hat"]]) 
+
+# CI
+exp(lowsalt[["fit"]][["beta_hat"]]) + c(-1,1)*1.968503 *lowsalt[["fit"]][["beta_se_adjusted"]]*exp(lowsalt[["fit"]][["beta_hat"]]) 
+
+# se
+lowsalt[["fit"]][["beta_se_adjusted"]]*exp(lowsalt[["fit"]][["beta_hat"]])
+```
+
+```{r}
+exp(lowsalt[["fit"]][["alpha_hat"]])
+
+# lower bound
+exp(lowsalt[["fit"]][["alpha_hat"]]) - 1.968503  * lowsalt[["fit"]][["alpha_se_adjusted"]] * exp(lowsalt[["fit"]][["alpha_hat"]])
+
+# upper bound
+exp(lowsalt[["fit"]][["alpha_hat"]]) + 1.968503  * lowsalt[["fit"]][["alpha_se_adjusted"]] * exp(lowsalt[["fit"]][["alpha_hat"]])
+
+# se
+lowsalt[["fit"]][["alpha_se_adjusted"]] * exp(lowsalt[["fit"]][["alpha_hat"]])
+```
+
+```{r}
+lowsalt1 = emee(analysisdata, id = "ParticipantIdentifier", outcome = "NumValues_LowSaltChoices_24hrAfter",
+                treatment="At_diet",
+                rand_prob = "prob_Obs_Intervention_Com", moderator_formula = ~ 1 +
+                  TimeEnrollment_to_PrefDate_days + I(TimeEnrollment_to_PrefDate_days^2), 
+                control_formula = ~ AgeAbove65 + GenderM + NumValues_LowSaltChoices_30minBefore +
+                  AboveMeanSodiumIntake + IsRaceWhite+
+                  TimeEnrollment_to_PrefDate_days + I(TimeEnrollment_to_PrefDate_days^2),
+                availability = IsAvailable_lowsalt, numerator_prob = 0.99)
+summary(lowsalt1)
+```
+
+Do data visualization for this model with time effect and keep activity dice roll
+
+
+```{r}
+diet_coef_gee = lowsalt1$fit$beta_hat
+diet_vcov_gee = lowsalt1$fit$varcov_adjusted[9:11,9:11]
+diet_bs_func = matrix(c(rep(1, 173),
+                     8:180,
+                     (8:180)^2), nrow = 173)
+df_diet = data.frame(Phase = 8:180,
+                    lowsalt_change= diet_bs_func %*% diet_coef_gee,
+                    SE =sqrt(diag(diet_bs_func %*% diet_vcov_gee %*% t(diet_bs_func))),
+                    Type = "Diet")
+
+```
+
+```{r}
+# previous use geom_errorbar instead of geom_ribbon
+linear_spline_gee_plot = ggplot(data=df_diet, aes(x= Phase, y=lowsalt_change)) +
+  geom_ribbon(aes(ymin=lowsalt_change-1.96*SE, ymax=lowsalt_change+1.96*SE),width=0.1, alpha = 0.3)+
+  xlab("Time from Enrollment")+
+  ylab("Intervention Effect on Low Salt Choices within 24 hr")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =0, linetype=2, color = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank())
+print(linear_spline_gee_plot)
+```
+
+
+Now the same plot but taking expectation.
+
+```{r}
+df_diet2 = data.frame(Phase = 8:180,
+                    lowsalt_change= exp(diet_bs_func %*% diet_coef_gee),
+                    SE = exp(diet_bs_func %*% diet_coef_gee) * 
+                      sqrt(diag(diet_bs_func %*% diet_vcov_gee %*% t(diet_bs_func))),
+                    Type = "Diet")
+
+linear_spline_gee_plot2 = ggplot(data=df_diet2, aes(x= Phase, y=lowsalt_change, color = Type)) +
+  geom_ribbon(aes(ymin=lowsalt_change-1.96*SE, ymax=lowsalt_change+1.96*SE),width=0.1, alpha = 0.3, fill = "#1F77B4")+
+  xlab("Time from Enrollment (days)")+
+  ylab("Intervention Effect on Low Salt Choices within 24 hr")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =1, linetype=2, color = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank()) + scale_color_manual(values = c("Diet"= "steelblue")) + coord_cartesian(ylim = c(0.6, 1.3)) + scale_y_continuous(breaks = seq(0.6,1.3, by = 0.1))
+print(linear_spline_gee_plot2)
+```
+
+
+# Add primary analysis for different outcomes
+
+## add age
+
+```{r}
+lowsalt_age = emee(analysisdata, id = "ParticipantIdentifier", outcome = "NumValues_LowSaltChoices_24hrAfter",
+                treatment="At_diet",
+                rand_prob = "prob_Obs_Intervention_Com", moderator_formula = ~ 1 + AgeAbove65, 
+                control_formula = ~ AgeAbove65 + GenderM + NumValues_LowSaltChoices_30minBefore +
+                 AboveMeanSodiumIntake + IsRaceWhite,
+                availability = IsAvailable_lowsalt, numerator_prob = 0.99)
+summary(lowsalt_age)
+
+```
+
+## add gender
+
+```{r}
+lowsalt_gender = emee(analysisdata, id = "ParticipantIdentifier", outcome = "NumValues_LowSaltChoices_24hrAfter",
+                treatment="At_diet",
+                rand_prob = "prob_Obs_Intervention_Com", moderator_formula = ~ 1 + GenderM, 
+                control_formula = ~ AgeAbove65 + GenderM + NumValues_LowSaltChoices_30minBefore +
+                 AboveMeanSodiumIntake + IsRaceWhite,
+                availability = IsAvailable_lowsalt, numerator_prob = 0.99)
+summary(lowsalt_gender)
+
+```
+
+
+## community
+
+```{r}
+lowsalt_community = emee(analysisdata, id = "ParticipantIdentifier", outcome = "NumValues_LowSaltChoices_24hrAfter",
+                treatment="At_diet",
+                rand_prob = "prob_Obs_Intervention_Com", moderator_formula = ~ 1 + IsCommunityAnnArbor, 
+                control_formula = ~ AgeAbove65 + GenderM + NumValues_LowSaltChoices_30minBefore +
+                 AboveMeanSodiumIntake + IsRaceWhite + IsCommunityAnnArbor,
+                availability = IsAvailable_lowsalt, numerator_prob = 0.99)
+summary(lowsalt_community)
+
+```
+
+## baseline salt intake
+
+```{r}
+lowsalt_basesalt = emee(analysisdata, id = "ParticipantIdentifier", outcome = "NumValues_LowSaltChoices_24hrAfter",
+                treatment="At_diet",
+                rand_prob = "prob_Obs_Intervention_Com", moderator_formula = ~ 1 + AboveMeanSodiumIntake, 
+                control_formula = ~ AgeAbove65 + GenderM + NumValues_LowSaltChoices_30minBefore +
+                 AboveMeanSodiumIntake + IsRaceWhite,
+                availability = IsAvailable_lowsalt, numerator_prob = 0.99)
+summary(lowsalt_basesalt)
+
+```
+
+## Add new outcomes
+
+```{r}
+new_Outcomes = read_csv("/Moderator.csv")
+# Mac path
+new_Outcomes = read_csv("/Moderator.csv")
+new_Outcomes$ParticipantIdentifier = as.character(new_Outcomes$ParticipantIdentifier)
+new_Outcomes$DiceRollRowID = as.numeric(new_Outcomes$DiceRollRowID)
+```
+
+```{r}
+dicerolled_newoutcomes = left_join(new_Outcomes, demo[,c("ParticipantIdentifier","AgeAtConsent_years_calc_fixed", "Gender", "IsCommunityAnnArbor", "IsRaceWhite")]) %>% filter(!is.na(DiceRollRowID)) %>% filter(ParticipantIdentifier %in% coreCohortID)
+
+dicerolled_newoutcomes$At_act = as.numeric(dicerolled_newoutcomes$IsDiceRollTypeActivity) * as.numeric(dicerolled_newoutcomes$IsDiceRollSuccess)
+dicerolled_newoutcomes$At_diet = as.numeric(dicerolled_newoutcomes$IsDiceRollTypeDiet) * as.numeric(dicerolled_newoutcomes$IsDiceRollSuccess)
+dicerolled_newoutcomes$At = dicerolled_newoutcomes$At_act + dicerolled_newoutcomes$At_diet
+```
+
+```{r}
+analysisdata_newoutcomes = dicerolled_newoutcomes
+# dichotomize age
+analysisdata_newoutcomes$AgeLarge65 = analysisdata_newoutcomes$AgeAtConsent_years_calc_fixed > 65
+
+analysisdata_newoutcomes$GenderM = as.numeric(analysisdata_newoutcomes$Gender=="M")
+
+analysisdata_newoutcomes$TimeInStudy_scaled = scale(analysisdata_newoutcomes$TimeEnrollment_to_PrefDate_days) 
+
+# Assume always available
+analysisdata_newoutcomes$IsAvailable = 1
+
+# convert IsPresent_DeviceDataPoints_60minAfter to numeric
+analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter = as.numeric(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter)
+
+# convert IsPresent_DeviceDataPoints_30minBefore
+analysisdata_newoutcomes$IsPresent_DeviceDataPoints_30minBefore =
+  as.numeric(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_30minBefore)
+```
+
+## outcome: whether use mobile application within 1 hour of dice roll (dichotomize yes/no)
+
+### Overall
+
+```{r}
+table(analysisdata_newoutcomes$At_diet, analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter)
+
+table(analysisdata_newoutcomes$At_diet, analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter)/rowSums(table(analysisdata_newoutcomes$At_diet, analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter))
+```
+
+```{r}
+# check missingness in 30 min before measurement 
+sum(is.na(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_30minBefore))
+```
+
+```{r}
+IsPresent_DeviceDataPoints =
+  MRTAnalysis::emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter),], id = "ParticipantIdentifier", outcome = "IsPresent_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite +
+                  IsPresent_DeviceDataPoints_30minBefore +
+                  TimeEnrollment_to_PrefDate_days, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(IsPresent_DeviceDataPoints)
+```
+
+```{r}
+(IsPresent_DeviceDataPoints[["fit"]][["beta_hat"]] - IsPresent_DeviceDataPoints[["fit"]][["conf_int_adjusted"]][1])/IsPresent_DeviceDataPoints[["fit"]][["beta_se_adjusted"]]
+
+exp(IsPresent_DeviceDataPoints[["fit"]][["beta_hat"]]) 
+IsPresent_DeviceDataPoints[["fit"]][["beta_se_adjusted"]]*exp(IsPresent_DeviceDataPoints[["fit"]][["beta_hat"]])
+
+exp(IsPresent_DeviceDataPoints[["fit"]][["beta_hat"]]) + c(-1,1)*1.968472 *IsPresent_DeviceDataPoints[["fit"]][["beta_se_adjusted"]]*exp(IsPresent_DeviceDataPoints[["fit"]][["beta_hat"]]) 
+```
+
+```{r}
+(IsPresent_DeviceDataPoints[["fit"]][["beta_hat"]] - IsPresent_DeviceDataPoints[["fit"]][["conf_int_adjusted"]][1])/IsPresent_DeviceDataPoints[["fit"]][["beta_se_adjusted"]]
+
+exp(IsPresent_DeviceDataPoints[["fit"]][["alpha_hat"]]) 
+
+IsPresent_DeviceDataPoints[["fit"]][["alpha_se_adjusted"]]*exp(IsPresent_DeviceDataPoints[["fit"]][["alpha_hat"]])
+
+# lower
+exp(IsPresent_DeviceDataPoints[["fit"]][["alpha_hat"]]) -1.968442 *IsPresent_DeviceDataPoints[["fit"]][["alpha_se_adjusted"]]*exp(IsPresent_DeviceDataPoints[["fit"]][["alpha_hat"]]) 
+
+# upper
+exp(IsPresent_DeviceDataPoints[["fit"]][["alpha_hat"]]) + 1.968442 *IsPresent_DeviceDataPoints[["fit"]][["alpha_se_adjusted"]]*exp(IsPresent_DeviceDataPoints[["fit"]][["alpha_hat"]]) 
+```
+
+```{r}
+IsPresent_DeviceDataPoints_time = MRTAnalysis::emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "IsPresent_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + TimeEnrollment_to_PrefDate_days +
+                  I(TimeEnrollment_to_PrefDate_days^2), 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + 
+                  IsPresent_DeviceDataPoints_30minBefore + TimeEnrollment_to_PrefDate_days +
+                  I(TimeEnrollment_to_PrefDate_days^2), 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(IsPresent_DeviceDataPoints_time)
+```
+
+```{r}
+coef_gee = IsPresent_DeviceDataPoints_time[["fit"]][["beta_hat"]]
+vcov_gee = IsPresent_DeviceDataPoints_time[["fit"]][["varcov_adjusted"]][8:10,8:10]
+bs_func = matrix(c(rep(1, 173),
+                     8:180,
+                     (8:180)^2), nrow = 173)
+```
+
+```{r}
+df = data.frame(Phase = 8:180,
+                    change= bs_func %*% coef_gee,
+                    SE = sqrt(diag(bs_func %*% vcov_gee %*% t(bs_func))),
+                    Type = "Diet")
+```
+
+```{r}
+## critical value
+(IsPresent_DeviceDataPoints_time[["fit"]][["beta_hat"]] - IsPresent_DeviceDataPoints_time[["fit"]][["conf_int_adjusted"]])/IsPresent_DeviceDataPoints_time[["fit"]][["beta_se_adjusted"]]
+
+
+plot = ggplot(data=df, aes(x= Phase, y=change, group = Type)) +
+  geom_ribbon(aes(ymin= change-1.968565*SE, ymax= change+1.968565*SE),width=0.1, alpha = 0.3)+
+  xlab("Time from Enrollment")+
+  ylab("Intervention Effect on whether Use Application")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =0, linetype=2, colour = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank())
+
+print(plot)
+```
+
+```{r}
+df2 = data.frame(Phase = 8:180,
+                  change= exp(bs_func %*% coef_gee),
+                    SE = exp(bs_func %*% coef_gee) * 
+                      sqrt(diag(bs_func %*% vcov_gee %*% t(bs_func))),
+                    Type = "Diet")
+
+plot2 = ggplot(data=df2, aes(x= Phase, y=change, group = Type, color = Type)) +
+  geom_ribbon(aes(ymin= change-1.968382 *SE, ymax= change+1.968382 *SE),width=0.1, alpha = 0.3, fill = "#1F77B4")+
+  xlab("Time from Enrollment")+
+  ylab("Intervention Effect on whether Use Application")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =1, linetype=2, colour = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank()) + scale_color_manual(values = c("Diet"= "steelblue")) + 
+  coord_cartesian(ylim = c(1, 4.5)) + scale_y_continuous(breaks = seq(1,5, by = 1))
+
+print(plot2)
+```
+
+### treatment effects by age groups
+
+```{r}
+IsPresent_DeviceDataPoints_age = MRTAnalysis::emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "IsPresent_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + AgeLarge65, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite +
+                  IsPresent_DeviceDataPoints_30minBefore, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(IsPresent_DeviceDataPoints_age)
+```
+
+### treatment effects by sex groups
+
+```{r}
+IsPresent_DeviceDataPoints_sex = MRTAnalysis::emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "IsPresent_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + GenderM, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + IsPresent_DeviceDataPoints_30minBefore, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(IsPresent_DeviceDataPoints_sex)
+```
+
+### treatment effects by community groups
+
+```{r}
+IsPresent_DeviceDataPoints_community = MRTAnalysis::emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$IsPresent_DeviceDataPoints_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "IsPresent_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + IsCommunityAnnArbor, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + IsCommunityAnnArbor + IsPresent_DeviceDataPoints_30minBefore, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(IsPresent_DeviceDataPoints_community)
+```
+
+```{r}
+(IsPresent_DeviceDataPoints_community[["fit"]][["beta_hat"]] - IsPresent_DeviceDataPoints_community[["fit"]][["conf_int_adjusted"]])/IsPresent_DeviceDataPoints_community[["fit"]][["beta_se_adjusted"]]
+
+exp(IsPresent_DeviceDataPoints_community[["fit"]][["beta_hat"]]) 
+IsPresent_DeviceDataPoints_community[["fit"]][["beta_se_adjusted"]]*exp(IsPresent_DeviceDataPoints_community[["fit"]][["beta_hat"]])
+
+# lower
+exp(IsPresent_DeviceDataPoints_community[["fit"]][["beta_hat"]]) - 1.968503  *IsPresent_DeviceDataPoints_community[["fit"]][["beta_se_adjusted"]]*exp(IsPresent_DeviceDataPoints_community[["fit"]][["beta_hat"]]) 
+
+# upper 
+exp(IsPresent_DeviceDataPoints_community[["fit"]][["beta_hat"]]) + 1.968503  *IsPresent_DeviceDataPoints_community[["fit"]][["beta_se_adjusted"]]*exp(IsPresent_DeviceDataPoints_community[["fit"]][["beta_hat"]]) 
+```
+
+```{r}
+exp(IsPresent_DeviceDataPoints_community[["fit"]][["alpha_hat"]]) 
+IsPresent_DeviceDataPoints_community[["fit"]][["alpha_se_adjusted"]]*exp(IsPresent_DeviceDataPoints_community[["fit"]][["alpha_hat"]])
+
+# lower
+exp(IsPresent_DeviceDataPoints_community[["fit"]][["alpha_hat"]]) - 1.968503  *IsPresent_DeviceDataPoints_community[["fit"]][["alpha_se_adjusted"]]*exp(IsPresent_DeviceDataPoints_community[["fit"]][["alpha_hat"]]) 
+
+# upper 
+exp(IsPresent_DeviceDataPoints_community[["fit"]][["alpha_hat"]]) + 1.968503  *IsPresent_DeviceDataPoints_community[["fit"]][["alpha_se_adjusted"]]*exp(IsPresent_DeviceDataPoints_community[["fit"]][["alpha_hat"]]) 
+```
+
+
+## outcome: number of actions/clicks within 1 hour of dice roll
+
+```{r}
+analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter = as.numeric(analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter)
+```
+
+### Overall
+
+```{r}
+table(analysisdata_newoutcomes$At_diet,analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter)
+```
+Because the outcome is no longer binary, have to use the edited function
+
+```{r}
+source("./Function download from Github/emee.R")
+source("./Function download from Github/preprocess_input.R")
+source("./Function download from Github/get_alpha_beta_from_multiroot_result.R")
+source("./Function download from Github/find_change_location.R")
+```
+
+```{r}
+# check missingness in 30 min before measurements
+analysisdata_newoutcomes$NumValues_DeviceDataPoints_30minBefore = as.numeric(analysisdata_newoutcomes$NumValues_DeviceDataPoints_30minBefore)
+sum(is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_30minBefore)) ## 0
+# no missingness
+```
+
+```{r}
+NumValues_DeviceDataPoints_60minAfter = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter) & 
+                                                                        !is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_30minBefore),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + NumValues_DeviceDataPoints_30minBefore + TimeEnrollment_to_PrefDate_days, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_DeviceDataPoints_60minAfter)
+```
+
+```{r}
+(NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_hat"]] - NumValues_DeviceDataPoints_60minAfter[["fit"]][["conf_int_adjusted"]])/NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_se_adjusted"]]
+
+exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_hat"]]) 
+NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_hat"]])
+
+# lower
+exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_hat"]]) - 1.968472   *NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_hat"]]) 
+
+# upper 
+exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_hat"]]) + 1.968472  *NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["beta_hat"]]) 
+```
+
+```{r}
+exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_hat"]]) 
+NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_hat"]])
+
+# lower
+exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_hat"]]) - 1.968442   *NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_hat"]]) 
+
+# upper 
+exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_hat"]]) + 1.968442  *NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter[["fit"]][["alpha_hat"]]) 
+```
+
+```{r}
+NumValues_DeviceDataPoints_60minAfter_time = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter) & 
+                                                                        !is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_30minBefore),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + TimeEnrollment_to_PrefDate_days +
+                  I(TimeEnrollment_to_PrefDate_days^2), 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + NumValues_DeviceDataPoints_30minBefore + TimeEnrollment_to_PrefDate_days +
+                  I(TimeEnrollment_to_PrefDate_days^2), 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_DeviceDataPoints_60minAfter_time)
+```
+
+```{r}
+coef_gee = NumValues_DeviceDataPoints_60minAfter_time[["fit"]][["beta_hat"]]
+vcov_gee = NumValues_DeviceDataPoints_60minAfter_time[["fit"]][["varcov_adjusted"]][8:10,8:10]
+bs_func = matrix(c(rep(1, 173),
+                     8:180,
+                     (8:180)^2), nrow = 173)
+```
+
+```{r}
+df = data.frame(Phase = 8:180,
+                    change= bs_func %*% coef_gee,
+                    SE = sqrt(diag(bs_func %*% vcov_gee %*% t(bs_func))),
+                    Type = "Diet")
+```
+
+```{r}
+## critical value
+(NumValues_DeviceDataPoints_60minAfter_time[["fit"]][["beta_hat"]] - NumValues_DeviceDataPoints_60minAfter_time[["fit"]][["conf_int_adjusted"]])/NumValues_DeviceDataPoints_60minAfter_time[["fit"]][["beta_se_adjusted"]]
+
+
+plot = ggplot(data=df, aes(x= Phase, y=change, group = Type)) +
+  geom_ribbon(aes(ymin= change-1.968382  *SE, ymax= change+1.968382  *SE),width=0.1, alpha = 0.3)+
+  xlab("Time from Enrollment")+
+  ylab("Intervention Effect on Number of Clicks")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =0, linetype=2, color = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank())
+
+print(plot)
+```
+
+```{r}
+df2 = data.frame(Phase = 8:180,
+                  change= exp(bs_func %*% coef_gee),
+                    SE = exp(bs_func %*% coef_gee) * 
+                      sqrt(diag(bs_func %*% vcov_gee %*% t(bs_func))),
+                    Type = "Diet")
+
+plot2 = ggplot(data=df2, aes(x= Phase, y=change, group = Type, color = Type)) +
+  geom_ribbon(aes(ymin= change-1.968565  *SE, ymax= change+1.968565  *SE),width=0.1, alpha = 0.3, fill = "#1F77B4")+
+  xlab("Time from Enrollment")+
+  ylab("Intervention Effect on Number of Clicks")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =1, linetype=2, color = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank()) + scale_color_manual(values = c("Diet"= "steelblue")) + 
+   coord_cartesian(ylim = c(1, 4.5)) + scale_y_continuous(breaks = seq(1,4.5, by = 1))
+
+print(plot2)
+```
+
+### treatment effects by age groups
+
+```{r}
+NumValues_DeviceDataPoints_60minAfter_age = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + AgeLarge65, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + NumValues_DeviceDataPoints_30minBefore,
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_DeviceDataPoints_60minAfter_age)
+```
+
+### treatment effects by sex groups
+
+```{r}
+NumValues_DeviceDataPoints_60minAfter_age = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + GenderM, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + NumValues_DeviceDataPoints_30minBefore,
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_DeviceDataPoints_60minAfter_age)
+```
+
+### treatment effects by community groups
+
+```{r}
+NumValues_DeviceDataPoints_60minAfter_community = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_DeviceDataPoints_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_DeviceDataPoints_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + IsCommunityAnnArbor, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + IsCommunityAnnArbor + NumValues_DeviceDataPoints_30minBefore,
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_DeviceDataPoints_60minAfter_community)
+```
+
+
+```{r}
+(NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_hat"]] - NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["conf_int_adjusted"]])/NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_se_adjusted"]]
+
+exp(NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_hat"]]) 
+NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_hat"]])
+
+# lower
+exp(NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_hat"]]) - 1.968503    *NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_hat"]]) 
+
+# upper 
+exp(NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_hat"]]) + 1.968503  *NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_se_adjusted"]]*exp(NumValues_DeviceDataPoints_60minAfter_community[["fit"]][["beta_hat"]]) 
+```
+
+
+## Outcomes: low salt searches within 1 hr of dice roll
+
+```{r}
+analysisdata_newoutcomes$NumValues_Searches_60minAfter = as.numeric(analysisdata_newoutcomes$NumValues_Searches_60minAfter)
+analysisdata_newoutcomes$NumValues_Searches_30minBefore = as.numeric(analysisdata_newoutcomes$NumValues_Searches_30minBefore)
+
+# check missingness in outcome
+sum(is.na(analysisdata_newoutcomes$NumValues_Searches_60minAfter)) # 0
+
+# check missingness in 30 min before measurement
+sum(is.na(analysisdata_newoutcomes$NumValues_Searches_30minBefore)) # 0
+```
+### Overall 
+
+```{r}
+NumValues_Searches_60minAfter = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_Searches_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_Searches_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + NumValues_Searches_30minBefore +
+                  TimeEnrollment_to_PrefDate_days,
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_Searches_60minAfter)
+```
+
+```{r}
+(NumValues_Searches_60minAfter[["fit"]][["beta_hat"]] - NumValues_Searches_60minAfter[["fit"]][["conf_int_adjusted"]])/NumValues_Searches_60minAfter[["fit"]][["beta_se_adjusted"]]
+
+exp(NumValues_Searches_60minAfter[["fit"]][["beta_hat"]]) 
+NumValues_Searches_60minAfter[["fit"]][["beta_se_adjusted"]]*exp(NumValues_Searches_60minAfter[["fit"]][["beta_hat"]])
+
+# lower
+exp(NumValues_Searches_60minAfter[["fit"]][["beta_hat"]]) - 1.968472      *NumValues_Searches_60minAfter[["fit"]][["beta_se_adjusted"]]*exp(NumValues_Searches_60minAfter[["fit"]][["beta_hat"]]) 
+
+# upper 
+exp(NumValues_Searches_60minAfter[["fit"]][["beta_hat"]]) + 1.968472    *NumValues_Searches_60minAfter[["fit"]][["beta_se_adjusted"]]*exp(NumValues_Searches_60minAfter[["fit"]][["beta_hat"]]) 
+```
+
+```{r}
+exp(NumValues_Searches_60minAfter[["fit"]][["alpha_hat"]]) 
+NumValues_Searches_60minAfter[["fit"]][["alpha_se_adjusted"]]*exp(NumValues_Searches_60minAfter[["fit"]][["alpha_hat"]])
+
+# lower
+exp(NumValues_Searches_60minAfter[["fit"]][["alpha_hat"]]) - 1.968442      *NumValues_Searches_60minAfter[["fit"]][["alpha_se_adjusted"]]*exp(NumValues_Searches_60minAfter[["fit"]][["alpha_hat"]]) 
+
+# upper 
+exp(NumValues_Searches_60minAfter[["fit"]][["alpha_hat"]]) + 1.968442    *NumValues_Searches_60minAfter[["fit"]][["alpha_se_adjusted"]]*exp(NumValues_Searches_60minAfter[["fit"]][["alpha_hat"]]) 
+```
+
+
+```{r}
+NumValues_Searches_60minAfter_time = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_Searches_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_Searches_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + TimeEnrollment_to_PrefDate_days +
+                  I(TimeEnrollment_to_PrefDate_days^2), 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + 
+                  NumValues_Searches_30minBefore + TimeEnrollment_to_PrefDate_days +
+                  I(TimeEnrollment_to_PrefDate_days^2),
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_Searches_60minAfter_time)
+```
+
+```{r}
+coef_gee = NumValues_Searches_60minAfter_time[["fit"]][["beta_hat"]]
+vcov_gee = NumValues_Searches_60minAfter_time[["fit"]][["varcov_adjusted"]][8:10,8:10]
+bs_func = matrix(c(rep(1, 173),
+                     8:180,
+                     (8:180)^2), nrow = 173)
+```
+
+```{r}
+df = data.frame(Phase = 8:180,
+                    change= bs_func %*% coef_gee,
+                    SE = sqrt(diag(bs_func %*% vcov_gee %*% t(bs_func))),
+                    Type = "Diet")
+```
+
+```{r}
+## critical value
+(NumValues_Searches_60minAfter_time[["fit"]][["beta_hat"]] - NumValues_Searches_60minAfter_time[["fit"]][["conf_int_adjusted"]])/NumValues_Searches_60minAfter_time[["fit"]][["beta_se_adjusted"]]
+
+
+plot = ggplot(data=df, aes(x= Phase, y=change, group = Type)) +
+  geom_ribbon(aes(ymin= change-1.968382  *SE, ymax= change+1.968382  *SE),width=0.1, alpha = 0.3)+
+  xlab("Time from Enrollment")+
+  ylab("Intervention Effect on Number of Low Salt Searches")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =0, linetype=2, color = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank())
+
+print(plot)
+```
+
+
+```{r}
+df2 = data.frame(Phase = 8:180,
+                  change= exp(bs_func %*% coef_gee),
+                    SE = exp(bs_func %*% coef_gee) * 
+                      sqrt(diag(bs_func %*% vcov_gee %*% t(bs_func))),
+                    Type = "Diet")
+
+plot2 = ggplot(data=df2, aes(x= Phase, y=change, group = Type, color = Type)) +
+  geom_ribbon(aes(ymin= change-1.968565 *SE, ymax= change+1.968565 *SE),width=0.1, alpha = 0.3, fill = "#1F77B4")+
+  xlab("Time from Enrollment")+
+  ylab("Intervention Effect on Number of Low Salt Searches")+
+  geom_line() +
+  geom_point(size = 1)+
+  ggpubr::theme_pubclean()+
+  geom_hline(yintercept =1, linetype=2, color = "red")+
+  theme(legend.position = "right",
+        legend.key = element_blank()) + scale_color_manual(values = c("Diet"= "steelblue")) + 
+  coord_cartesian(ylim = c(1, 4.5)) + scale_y_continuous(breaks = seq(1,4.5, by = 1))
+
+print(plot2)
+```
+
+### treatment effects by age groups
+
+```{r}
+NumValues_Searches_60minAfter_age = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_Searches_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_Searches_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + AgeLarge65, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + NumValues_Searches_30minBefore, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_Searches_60minAfter_age)
+```
+
+### treatment effects by sex groups
+
+```{r}
+NumValues_Searches_60minAfter_sex = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_Searches_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_Searches_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + GenderM, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + NumValues_Searches_30minBefore, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_Searches_60minAfter_sex)
+```
+
+### treatment effects by community groups
+
+```{r}
+NumValues_Searches_60minAfter_community = emee(analysisdata_newoutcomes[!is.na(analysisdata_newoutcomes$NumValues_Searches_60minAfter),], 
+                                  id = "ParticipantIdentifier", outcome = "NumValues_Searches_60minAfter",
+                treatment="At_diet",
+                rand_prob = 0.99, moderator_formula = ~ 1 + IsCommunityAnnArbor, 
+                control_formula = ~ AgeLarge65 + GenderM + IsRaceWhite + IsCommunityAnnArbor + NumValues_Searches_30minBefore, 
+                availability = IsAvailable,  numerator_prob = 0.99)
+summary(NumValues_Searches_60minAfter_community)
+```
+
+
+
+
+
+
+
+
+
+

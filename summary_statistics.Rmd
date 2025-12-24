@@ -1,0 +1,476 @@
+---
+title: "Summary Statistics"
+output: html_document
+date: "2024-06-20"
+---
+
+```{r, warning=FALSE, message=FALSE,results='hide'}
+library(readxl)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(table1)
+```
+
+# load data
+
+```{r}
+data = read_excel("/data.xlsx")
+
+# remove the default year month in time records
+data$PrefTime_ET = format(as.POSIXct(data$PrefTime_ET,
+                   format = '%m/%d/%Y %H:%M:%S'),
+                   format = '%H:%M:%S')
+data$NotificationTime_ET = format(as.POSIXct(data$NotificationTime_ET,
+                   format = '%m/%d/%Y %H:%M:%S'),
+                   format = '%H:%M:%S') 
+data$DiceRollTime_ET = format(as.POSIXct(data$DiceRollTime_ET,
+                   format = '%m/%d/%Y %H:%M:%S'),
+                   format = '%H:%M:%S') 
+```
+
+load demographic data
+
+```{r}
+demo = read_csv("/data1.csv")
+
+demo = demo %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
+demo$ParticipantIdentifier = as.character(demo$ParticipantIdentifier)
+
+data = left_join(data, demo)
+
+# load baseline step data
+base_step = read_csv("/data2.csv")
+base_step = base_step %>% filter(ParticipantIdentifier %in% data$ParticipantIdentifier)
+base_step$ParticipantIdentifier = as.character(base_step$ParticipantIdentifier)
+
+data = left_join(data, base_step)
+```
+load the baseline salt intake values
+
+```{r}
+saltintake = read_csv("/data3.csv")
+
+saltintake = saltintake %>% select(ParticipantIdentifier, SodiumIntakeScore) %>% group_by(ParticipantIdentifier) %>% slice(1)
+saltintake$ParticipantIdentifier = as.character(saltintake$ParticipantIdentifier)
+
+data = left_join(data, saltintake)
+```
+
+Remove participants who have missingness in age, gender, race (white or non-White), baseline step counts, community, baseline salt intake; 
+
+```{r}
+demo = left_join(demo, base_step)
+demo = left_join(demo, saltintake)
+
+# this person's 30 min before step counts always missing so remove him/she from core cohort
+data$SumValues_Steps_30minBefore[data$ParticipantIdentifier == "11056"]
+
+# edit demo dataset
+demo = demo %>% filter(!is.na(AgeAtConsent_years_calc_fixed) & !IsGenderMissing & !is.na(IsRaceMissing) & !is.na(base_steps) & !IsCommunityMissing & (ParticipantIdentifier != "11056"))
+
+# get participant ID for core cohort
+coreCohortID = demo$ParticipantIdentifier
+# save the cohort ID
+saveRDS(coreCohortID, "coreCohortID.rds")
+write.csv(coreCohortID, "coreCohortID.csv", row.names = F)
+```
+
+# Demographic
+
+```{r}
+demo$IsRaceWhite = ifelse(demo$race_char == "White",1,0)
+```
+
+```{r}
+table1(~AgeAtConsent_years_calc_int + factor(Race) + factor(IsWithdrawn) + TimeEnrollment_to_Exit_days + factor(IsGenderMale) + Community + base_steps + factor(IsRaceWhite) + SodiumIntakeScore, data = demo)
+```
+
+
+# Cohort size
+
+only keep records for the selected cohort
+
+```{r}
+data = data %>% filter(ParticipantIdentifier %in% coreCohortID)
+```
+
+```{r}
+n_distinct(data$ParticipantIdentifier)
+```
+
+In total, we have 287 participants and 191,987 records. 
+
+# Create availability based on heart rate
+
+```{r}
+data$IsAvailable = ifelse(data$IsPresent_HeartRate_30minBefore == 1, 1, 0)
+```
+
+# Days in study
+
+There is a column called "TimeEnrollment_to_PrefDate_days" in the dataset. It records the the number of days from Enrollment Date to the preferred notification sending date. For each participant, I will take the biggest value for this column as number of day in study for this person.
+
+```{r}
+dayinstudy = data %>% group_by(ParticipantIdentifier) %>% summarise(nobs = n(),
+  Intervention_days = max(TimeEnrollment_to_PrefDate_days) - min(TimeEnrollment_to_PrefDate_days) + 1,
+  Enrolldays = max(TimeEnrollment_to_PrefDate_days),DecisionTimepoint = sum(!is.na(DiceRollRowID)))
+
+head(dayinstudy)
+summary(dayinstudy$nobs)
+sd(dayinstudy$nobs)
+summary(dayinstudy$Intervention_days)
+sd(dayinstudy$Intervention_days)
+summary(dayinstudy$Enrolldays)
+sd(dayinstudy$Enrolldays)
+summary(dayinstudy$DecisionTimepoint)
+sd(dayinstudy$DecisionTimepoint)
+```
+
+```{r}
+hist(dayinstudy$DayInStudy, breaks = 20, main = "Histogram of Day In Study", xlab = "Day in study")
+```
+
+# Change Preference Time
+
+The user can change the preference time for notification, but not all changes are success i.e. the dice roll happens. 
+
+Have questions about this record
+
+Can check participant with participant id 208.
+
+# Missingness in dice roll
+
+There is no missing data in "PrefDatetimeRowID", "ParticipantIdentifier", "TimeEnrollment_to_PrefDate_days", "PrefDate_ET", "DoesPrefDateHaveRepeat", "JITAIOrder", "JITAITimeOfDay", "PrefRepeatRank", "PrefTime_ET", "PrefDatetime_ET"
+
+The missingness in "IsAvailable", "NumHeartRate_30minBefore", "WearTime_hr_30minBefore", "NumHeartRate_60minAfter", "WearTime_hr_60minAfter", "NumHeartRate_24hrAfter", "WearTime_hr_24hrAfter", "NumSteps_60minAfter", "NumLowSaltChoices_24hrAfter" are all associated with "IsDiceRollSuccess".
+
+Therefore, in this section, I mainly present the missing data in "IsDiceRollSuccess".
+
+```{r}
+# Overall
+sum(is.na(data$IsDiceRollSuccess))/dim(data)[1]
+```
+
+Among all 227,646 records (including *inactive period*), 8.4% decision time points fail to have a dice roll performed.
+
+Because the data is longitudinal, one participant can have hundreds of records. Now I present the percentage of failing to perform a dice roll at participant level. 
+
+```{r}
+# participant level
+missingness = data %>% group_by(ParticipantIdentifier) %>% summarise(total_obs = n(),
+                                                                     missing_Dice = sum(is.na(IsDiceRollSuccess)))
+missingness$percentage = missingness$missing_Dice/missingness$total_obs
+head(missingness)
+```
+
+```{r}
+summary(missingness)
+sd(missingness$total_obs)
+sd(missingness$missing_Dice)
+sd(missingness$percentage)
+```
+
+Note there are participants who don't have any dice roll happened. Below I present those participants.
+
+```{r}
+print(missingness[missingness$percentage == 1,])
+```
+
+```{r}
+hist(missingness$percentage, breaks = 40, xlab = "Percentage of not performing dice roll",
+     main = "Histogram of percentage of not performing a dice roll at participant level")
+```
+
+# Dice roll
+
+Among all records with dice roll happened, I investigate the dice roll time points per day, dice roll types, and whether dice roll success. 
+
+
+```{r}
+DiceRoll = data %>% filter(!is.na(IsDiceRollSuccess)) %>% group_by(ParticipantIdentifier, DiceRollDate_ET) %>%
+  summarise(DiceRoll_times = n(), Act_prop = mean(IsDiceRollTypeActivity),
+            Diet_prop = mean(IsDiceRollTypeDiet),
+            DiceRollSuccess_Percentage = mean(IsDiceRollSuccess),
+            DiceRollfail_Percentage = mean(1 - IsDiceRollSuccess))
+head(DiceRoll)
+```
+
+Participants can impact the number of dice roll perform per day through changing the preference notification time, but there are only a small proportion. For the simplicity of analysis, I assume dice roll and its type are independent with participants and date.
+
+```{r}
+mean(DiceRoll$DiceRoll_times)
+# The distribution of number of dice roll perform per day
+DiceRoll %>% group_by(DiceRoll_times) %>% summarise(num_obs = n(),
+                                                    Prop = paste0(round(n()/dim(DiceRoll)[1]*100,3), "%"))
+```
+
+Most of time, 4 dice rolls are performed per day.
+
+```{r}
+sd(DiceRoll$DiceRoll_times)
+summary(DiceRoll$DiceRoll_times)
+```
+
+```{r}
+# The proportion of activity type dice roll
+sd(DiceRoll$Act_prop)
+summary(DiceRoll$Act_prop)
+```
+
+```{r}
+# The proportion of diet type dice roll
+sd(DiceRoll$Diet_prop)
+summary(DiceRoll$Diet_prop)
+```
+
+As designed, there is equal chance of dice roll for diet and activity.
+
+```{r}
+# success dice roll
+sd(DiceRoll$DiceRollSuccess_Percentage)
+summary(DiceRoll$DiceRollSuccess_Percentage)
+```
+
+```{r}
+# fail dice roll
+sd(DiceRoll$DiceRollfail_Percentage)
+summary(DiceRoll$DiceRollfail_Percentage)
+```
+
+
+The dice roll performs as we designed i.e. 25% success rate. 
+
+# Notification
+
+```{r}
+#
+# notification = data %>% filter(!is.na(NotificationRowID)) %>% group_by(ParticipantIdentifier, NotificationDate_ET) %>%
+#   summarise(notification_num = n(),
+#             num_morning = sum(JITAITimeOfDay == "Morning"),
+#             num_Lunch = sum(JITAITimeOfDay == "Lunch"),
+#             num_Afternoon = sum(JITAITimeOfDay == "Afternoon"),
+#             num_Evening = sum(JITAITimeOfDay == "Evening"),
+#             activity_prop = sum(IsJITAISubjectActivity)/n(),
+#             activity_prop_morning = sum(IsJITAISubjectActivity*(JITAITimeOfDay == "Morning"))/sum(JITAITimeOfDay == "Morning"),
+#             activity_prop_Lunch = sum(IsJITAISubjectActivity*(JITAITimeOfDay == "Lunch"))/sum(JITAITimeOfDay == "Lunch"),
+#             activity_prop_Afternoon = sum(IsJITAISubjectActivity*(JITAITimeOfDay == "Afternoon"))/sum(JITAITimeOfDay == "Afternoon"),
+#             activity_prop_Evening = sum(IsJITAISubjectActivity*(JITAITimeOfDay == "Evening"))/sum(JITAITimeOfDay == "Evening"),
+#             diet_prop_Morning = sum(IsJITAISubjectDiet*(JITAITimeOfDay == "Morning"))/sum(JITAITimeOfDay == "Morning"),
+#             diet_prop_Lunch = sum(IsJITAISubjectDiet*(JITAITimeOfDay == "Lunch"))/sum(JITAITimeOfDay == "Lunch"),
+#             diet_prop_Afternoon = sum(IsJITAISubjectDiet*(JITAITimeOfDay == "Afternoon"))/sum(JITAITimeOfDay == "Afternoon"),
+#             diet_prop_Evening = sum(IsJITAISubjectDiet*(JITAITimeOfDay == "Evening"))/sum(JITAITimeOfDay == "Evening"),
+#             diet_prop = sum(IsJITAISubjectDiet)/n())
+# head(notification)
+#
+```
+
+```{r}
+notification = data %>% filter(!is.na(DiceRollDate_ET)) %>% group_by(ParticipantIdentifier, DiceRollDate_ET) %>%
+   summarise(notification_num = sum(!is.na(NotificationRowID)),
+             num_morning = sum(TimeOfDay[!is.na(NotificationRowID)] == "Morning"),
+             num_Lunch = sum(TimeOfDay[!is.na(NotificationRowID)] == "Lunch"),
+             num_Afternoon = sum(TimeOfDay[!is.na(NotificationRowID)] == "Afternoon"),
+             num_Evening = sum(TimeOfDay[!is.na(NotificationRowID)] == "Evening"),
+             activity_prop = sum(IsDiceRollTypeActivity[!is.na(NotificationRowID)])/sum(!is.na(NotificationRowID)),
+             activity_prop_morning = sum(IsDiceRollTypeActivity[!is.na(NotificationRowID)]*
+                                           (TimeOfDay[!is.na(NotificationRowID)] == "Morning"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Morning"),
+             activity_prop_Lunch = sum(IsDiceRollTypeActivity[!is.na(NotificationRowID)]*
+                                         (TimeOfDay[!is.na(NotificationRowID)] == "Lunch"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Lunch"),
+             activity_prop_Afternoon = sum(IsDiceRollTypeActivity[!is.na(NotificationRowID)]*
+                                             (TimeOfDay[!is.na(NotificationRowID)] == "Afternoon"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Afternoon"),
+             activity_prop_Evening = sum(IsDiceRollTypeActivity[!is.na(NotificationRowID)]*
+                                           (TimeOfDay[!is.na(NotificationRowID)] == "Evening"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Evening"),
+             diet_prop_Morning = sum(IsDiceRollTypeDiet[!is.na(NotificationRowID)]*
+                                       (TimeOfDay[!is.na(NotificationRowID)] == "Morning"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Morning"),
+             diet_prop_Lunch = sum(IsDiceRollTypeDiet[!is.na(NotificationRowID)]*
+                                     (TimeOfDay[!is.na(NotificationRowID)] == "Lunch"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Lunch"),
+             diet_prop_Afternoon = sum(IsDiceRollTypeDiet[!is.na(NotificationRowID)]*
+                                         (TimeOfDay[!is.na(NotificationRowID)] == "Afternoon"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Afternoon"),
+             diet_prop_Evening = sum(IsDiceRollTypeDiet[!is.na(NotificationRowID)]*
+                                       (TimeOfDay[!is.na(NotificationRowID)] == "Evening"))/
+               sum(TimeOfDay[!is.na(NotificationRowID)] == "Evening"),
+             diet_prop = sum(IsDiceRollTypeDiet[!is.na(NotificationRowID)])/sum(!is.na(NotificationRowID)))
+
+```
+
+
+```{r}
+# The distribution of number of notification per day
+# mean(notification$notification_num)
+
+notif_include0 = data %>% filter(!is.na(DiceRollDate_ET)) %>% group_by(ParticipantIdentifier, DiceRollDate_ET) %>% 
+  summarise(notification_num = sum(!is.na(NotificationRowID)),
+            notification_available_num = sum(!is.na(NotificationRowID) & IsAvailable))
+
+# general notification without consider availability
+notif_include0 %>% group_by(notification_num) %>% summarise(num_obs = n(),
+                                                    Prop = paste0(round(n()/dim(notif_include0)[1]*100,3), "%"))
+
+# notification considered availability
+notif_include0  %>% group_by(notification_available_num) %>% summarise(num_obs = n(),
+                                                    Prop = paste0(round(n()/dim(notif_include0)[1]*100,3), "%"))
+
+sd(notif_include0$notification_num)
+summary(notif_include0$notification_num)
+
+sd(notif_include0$notification_available_num)
+summary(notif_include0$notification_available_num)
+```
+
+Most of time the participant receive 1 or 2 notifications per day.
+
+```{r}
+table1(~notification_num + num_morning + num_Lunch + num_Afternoon+num_Evening +  activity_prop+ diet_prop + 
+         activity_prop_morning + activity_prop_Lunch + 
+         activity_prop_Afternoon + activity_prop_Evening + diet_prop_Morning + 
+         diet_prop_Lunch + diet_prop_Afternoon + diet_prop_Evening,notification)
+```
+
+```{r}
+# The proportion of activity type notification
+summary(notification$activity_prop)
+```
+
+```{r}
+# The proportion of diet type notification
+summary(notification$diet_prop)
+```
+
+As designed, there is equal chance of sending diet or activity notification.
+
+
+# Availability
+
+The missing pattern in availability is exactly the same as dice roll. Here I just present summary statistics for participant availability.
+
+```{r}
+availability = data %>% filter(!is.na(IsAvailable)) %>% group_by(ParticipantIdentifier) %>% 
+  summarise(num_records = n(), Available_prop = sum(IsAvailable)/n(), 
+            available_act = sum(IsAvailable & IsDiceRollTypeActivity)/sum(IsDiceRollTypeActivity),
+            available_diet = sum(IsAvailable & IsDiceRollTypeDiet)/sum(IsDiceRollTypeDiet))
+head(availability)
+```
+
+
+```{r}
+summary(availability$Available_prop)
+sd(availability$Available_prop)
+
+hist(availability$Available_prop, xlab = "Proportion of time the participant is available during the study",
+     main = "Histogram of Avaiability")
+```
+
+On average, 89.20% of time the participant is available during the study.
+
+```{r}
+avail_time_trend = data %>% filter(!is.na(IsAvailable)) %>% group_by(TimeEnrollment_to_PrefDate_days) %>% 
+  summarise(num_records = n(), Available_prop = sum(IsAvailable)/n())
+head(avail_time_trend)
+```
+
+```{r}
+ggplot(avail_time_trend, aes(x = TimeEnrollment_to_PrefDate_days, y = Available_prop)) + geom_point() + 
+  labs(x = "Time from enrollment",
+       y = "Availability proportion per day") + geom_smooth(method = "loess", se = FALSE)
+```
+
+```{r}
+avail_time_trend[which.max(avail_time_trend$Available_prop),]
+avail_time_trend[which.min(avail_time_trend$Available_prop),]
+
+summary(avail_time_trend$Available_prop)
+sd(avail_time_trend$Available_prop)
+```
+
+# After dice roll, within 1 hr, wear time & step counts
+
+Missing patterns in wear time and step counts are exactly the same as dice roll.
+
+```{r}
+# data remove missing records due to fail to perform dice roll
+diceroll_happened = data %>% filter(!is.na(IsDiceRollSuccess))
+```
+
+Generate a new data set records the average wear time after dice roll for each participant per day and average step counts classified by notificaiton type.
+
+```{r}
+weartime_stepcounts = diceroll_happened %>% group_by(ParticipantIdentifier) %>% 
+  summarise(Avg_wear_time_hr_60minAfterDice = mean(WearTime_hr_60minAfter),
+            Avg_stepCounts_60minAfterDice = mean(NumSteps_60minAfter),
+            Avg_stepCounts_noNotification_activity = mean(NumSteps_60minAfter[which(is.na(NotificationSubject) & 
+                                                                       (IsJITAISubjectActivity == 1) == 1)]),
+            Avg_stepCounts_noNotification_diet = mean(NumSteps_60minAfter[is.na(NotificationSubject) & 
+                                                                       (IsJITAISubjectDiet == 1)]),
+            Avg_stepCounts_diet = mean(NumSteps_60minAfter[(IsJITAISubjectDiet == 1)*(!is.na(NotificationSubject)) == 1]),
+            Avg_stepCounts_Activity = mean(NumSteps_60minAfter[(IsJITAISubjectActivity == 1)*
+                                                                       (!is.na(NotificationSubject)) == 1]))
+
+head(weartime_stepcounts)
+```
+
+```{r}
+summary(weartime_stepcounts$Avg_wear_time_hr_60minAfterDice)
+sd(weartime_stepcounts$Avg_wear_time_hr_60minAfterDice)
+```
+
+```{r}
+hist(weartime_stepcounts$Avg_wear_time_hr_60minAfterDice, breaks = 20, xlab = "60min after Dice roll, the average wear time",
+     main = "Histogram of wear time 60min after dice roll")
+```
+
+```{r}
+widews = weartime_stepcounts[,-2]
+colnames(widews)[2:6] = c("Average", "No_Notif_Activity", "No_Notif_diet", "Activity_Notification", "Diet_Notification")
+longweartime_stepcount = tidyr::gather(widews, types, step_counts, Average:Diet_Notification, factor_key=TRUE)
+ggplot(data = longweartime_stepcount, aes(x = types, y = step_counts, fill = types)) + geom_boxplot() + ggtitle("Boxplot for Step Counts 60-min After Dice Roll")
+```
+
+The warning when plotting the boxplot is because the participant whose id is 11056 doesn't receive any diet notification.
+
+
+# After dice roll, within 24 hr, wear time & self report low salt choice
+
+Missing patterns in wear time and low salt choice are exactly the same as dice roll.
+
+
+Generate a new data set records the average wear time after dice roll for each participant per day and average salt choice classified by notificaiton type.
+
+```{r}
+weartime_salt = diceroll_happened %>% group_by(ParticipantIdentifier) %>% 
+  summarise(Avg_wear_time_hr_24hrAfterDice = mean(SumValues_WearTime_hr_24hrAfter,na.rm = T),
+            Avg_salt_24hrAfterDice = mean(NumValues_LowSaltChoices_24hrAfter),
+            Avg_salt_noNotification_activity = mean(NumValues_LowSaltChoices_24hrAfter[is.na(NotificationType) & 
+                                                                       (IsDiceRollTypeActivity == 1)]),
+            Avg_salt_noNotification_diet = mean(NumValues_LowSaltChoices_24hrAfter[is.na(NotificationType) & 
+                                                                       (IsDiceRollTypeDiet == 1)]),
+            Avg_salt_Activity = mean(NumValues_LowSaltChoices_24hrAfter[(IsDiceRollTypeActivity == 1) & (!is.na(NotificationType))]),
+            Avg_salt_diet = mean(NumValues_LowSaltChoices_24hrAfter[(IsDiceRollTypeDiet == 1) & (!is.na(NotificationType))]))
+head(weartime_salt)
+```
+
+```{r}
+sd(weartime_salt$Avg_wear_time_hr_24hrAfterDice,na.rm = T)
+summary(weartime_salt$Avg_wear_time_hr_24hrAfterDice)
+```
+
+```{r}
+hist(weartime_salt$Avg_wear_time_hr_24hrAfterDice, breaks = 20, main = "Histogram of  wear time 24 hr after dice roll",
+     xlab = "wear time")
+```
+
+```{r}
+widesalt = weartime_salt[,-2]
+colnames(widesalt)[2:6] = c("Average", "No_Notif_Activity", "No_Notif_diet", "Activity_Notification", "Diet_Notification")
+longweartime_salt = tidyr::gather(widesalt, types, selfreport_saltChoice, Average:Diet_Notification, factor_key=TRUE)
+ggplot(data = longweartime_salt, aes(x = types, y = selfreport_saltChoice, fill = types)) + geom_boxplot() + 
+  ggtitle("Boxplot for Self Report Low Salt Choice 24-hr After Dice Roll") + ylab("# self report low salt choices")
+```
+
